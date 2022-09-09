@@ -1,0 +1,72 @@
+@startuml
+
+participant user
+participant emacs
+participant envrc
+participant envrc_cache
+participant envrc_hook
+
+== Init ==
+
+envrc -> emacs: register as global minor mode
+
+==  Mode Init ==
+
+envrc -[#red]> emacs: register kill buffer hook
+
+== Open file in unopened direnv project ==
+
+user -> emacs: ask emacs to open file
+emacs -> emacs: create buffer
+emacs -> envrc: call mode code on buffer
+envrc -> envrc: search for envrc
+envrc -> envrc_cache: ask for envrc key
+envrc -> envrc: call direnv
+envrc -> envrc_cache: set value
+envrc -[#red]> envrc_cache: set unload function (with value ?)
+envrc -> emacs : replace with new configuration
+envrc -[#red]> emacs : execute load function
+
+== Open file in already opened direnv project ==
+
+user -> emacs: ask emacs to open file
+emacs -> emacs: create buffer
+emacs -> envrc: call mode code on buffer
+envrc -> envrc: search for envrc
+envrc -> envrc_cache: ask for envrc key
+envrc -> envrc_cache: fetch value
+envrc -> emacs : replace with new configuration
+
+== When running direnv reload all ==
+
+envrc -[#red]> emacs : execute all unload functions
+envrc -> envrc_cache : clear all
+envrc -> envrc : for each envrc buffer apply functions above
+
+== When running direnv reload one bufffer/ direnv allow / direnv deny ==
+
+envrc -> envrc: find current buffer envrc file
+envrc -[#red]> emacs : execute unload function
+envrc -> envrc_cache: delete all entries with envrc
+envrc -> envrc : for each envrc buffer if the buffer depends on envrc file, apply functions above
+
+== When one envrc is used by multiple buffers and closing one of them ==
+
+note across : nothing ?
+
+envrc_hook -[#red]> envrc : if we are in list envrc-mode buffers which depends on this envrc file
+
+== When one envrc is used by one buffer and closing that one ==
+
+note across : nothing ?
+
+envrc_hook -[#red]> envrc : if we are in a envrc mode, list envrc-mode buffers which depends on this envrc file
+envrc -[#red]> envrc : execute unload for this envrc
+
+== Mode tear down ==
+
+envrc_hook -[#red]> envrc : list envrc-mode buffers which depends on this envrc file
+envrc -[#red]> envrc : if last buffer, execute unload for this envrc
+envrc -[#red]> emacs: if last envrc mode buffer, remove kill buffer hook
+
+@enduml

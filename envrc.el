@@ -5,7 +5,7 @@
 ;; Author: Steve Purcell <steve@sanityinc.com>
 ;; Keywords: processes, tools
 ;; Homepage: https://github.com/purcell/envrc
-;; Package-Requires: ((seq "2") (emacs "25.1") (inheritenv "0.1"))
+;; Package-Requires: ((seq "2") (emacs "28.1") (inheritenv "0.1"))
 ;; Package-Version: 0
 
 ;; This program is free software; you can redistribute it and/or modify
@@ -75,6 +75,18 @@
 Messages are written into the *envrc-debug* buffer."
   :type 'boolean)
 
+(defcustom envrc-allow-load nil
+  ""
+  :type 'boolean)
+
+(defcustom envrc-load-function-name "ENVRC_LOAD_FUNCTION"
+  ""
+  :type 'string)
+
+(defcustom envrc-unload-function-name "ENVRC_UNLOAD_FUNCTION"
+  ""
+  :type 'string)
+
 (define-obsolete-variable-alias 'envrc--lighter 'envrc-lighter "2021-05-17")
 
 (defcustom envrc-lighter '(:eval (envrc--lighter))
@@ -119,8 +131,18 @@ e.g. (define-key envrc-mode-map (kbd \"C-c e\") 'envrc-command-map)"
   :lighter envrc-lighter
   :keymap envrc-mode-map
   (if envrc-mode
-      (envrc--update)
-    (envrc--clear (current-buffer))))
+      (progn
+        (when envrc-allow-load
+            ;; Not a functional problem to do it on each buffer since add-hook will not re-add.
+            ;; Need to investigate performance.
+            (add-hook 'kill-buffer-hook 'envrc--kill-buffer-hook))
+        (envrc--update))
+    (progn
+      (when envrc-allow-load
+        (progn
+          (when (length= (envrc--mode-buffers) 1) (remove-hook 'kill-buffer-hook 'envrc--kill-buffer-hook))
+          (envrc--execute-unload-function-if-last)))
+      (envrc--clear (current-buffer)))))
 
 ;;;###autoload
 (define-globalized-minor-mode envrc-global-mode envrc-mode
@@ -148,6 +170,48 @@ e.g. (define-key envrc-mode-map (kbd \"C-c e\") 'envrc-command-map)"
 One of '(none on error).")
 
 ;;; Internals
+
+(defun envrc--execute-string (s)
+  ""
+    (if (and (stringp s) (not (string= s "")))
+        (progn
+          (envrc--debug "Envrc executing %s" s)
+          (eval (car (read-from-string s))))))
+
+(defun envrc--find-entry (l entry-name)
+  ""
+  (seq-some (lambda (pair) (if (string= (car pair) entry-name) (cdr pair))) l))
+
+(defun envrc--find-cache-entry (cache-key entry-name)
+  ""
+   (pcase (gethash cache-key envrc--cache 'missing)
+     (`missing "")
+     (cached (envrc--find-entry cached entry-name))))
+
+(defun envrc--last-buffer-for-envrc-file? (env-dir)
+  ""
+  (let ((buflist (seq-filter (lambda (buf)
+                               (with-current-buffer buf
+                                 (string= (envrc--find-env-dir) env-dir)))
+                             (envrc--mode-buffers))))
+    (length= buflist 1)))
+
+(defun envrc--execute-unload-function (env-dir)
+  ""
+  (let* ((cache-key (envrc--cache-key env-dir (default-value 'process-environment)))
+         (unload-string (envrc--find-cache-entry cache-key envrc-unload-function-name)))
+    (envrc--execute-string unload-string)))
+
+(defun envrc--execute-unload-function-if-last ()
+  ""
+  (let ((env-dir (envrc--find-env-dir)))
+    (if (envrc--last-buffer-for-envrc-file? env-dir)
+        (envrc--execute-unload-function env-dir))))
+
+(defun envrc--kill-buffer-hook ()
+  "TODO"
+  (if envrc-mode
+      (envrc--execute-unload-function-if-last)))
 
 (defun envrc--lighter ()
   "Return a colourised version of `envrc--status' for use in the mode line."
@@ -297,14 +361,19 @@ also appear in PAIRS."
       (let ((path (getenv "PATH"))) ;; Get PATH from the merged environment: direnv may not have changed it
         (setq-local exec-path (parse-colon-path path))
         (when (derived-mode-p 'eshell-mode)
-          (setq-local eshell-path-env path))))))
+          (setq-local eshell-path-env path))
+        (when envrc-allow-load
+          (envrc--execute-string (envrc--find-entry result envrc-load-function-name)))))))
 
 (defun envrc--update-env (env-dir)
   "Refresh the state of the direnv in ENV-DIR and apply in all relevant buffers."
   (envrc--debug "Invalidating cache for env %s" env-dir)
   (cl-loop for k being the hash-keys of envrc--cache
            if (string-prefix-p (concat env-dir "\0") k)
-           do (remhash k envrc--cache))
+           do (progn
+                (when envrc-allow-load
+                  (envrc--execute-string (envrc--find-cache-entry k envrc-unload-function-name)))
+                (remhash k envrc--cache)))
   (envrc--debug "Refreshing all buffers in env  %s" env-dir)
   (dolist (buf (envrc--mode-buffers))
     (with-current-buffer buf
@@ -371,6 +440,9 @@ ARGS is as for `call-process'."
 This can be useful if a .envrc has been deleted."
   (interactive)
   (envrc--debug "Invalidating cache for all envs")
+  (when envrc-allow-load
+    (cl-loop for k being the hash-keys of envrc--cache
+             do (envrc--execute-string (envrc--find-cache-entry k envrc-unload-function-name))))
   (clrhash envrc--cache)
   (dolist (buf (envrc--mode-buffers))
     (with-current-buffer buf
